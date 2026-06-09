@@ -1,13 +1,19 @@
 import os
 import requests
 from datetime import datetime, timedelta
-from flask import Flask
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
 SHOPIFY_STORE_DOMAIN = os.environ.get("SHOPIFY_STORE_DOMAIN")
 SHOPIFY_ADMIN_API_TOKEN = os.environ.get("SHOPIFY_ADMIN_API_TOKEN")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
+
+# for API access token
+CLIENT_ID     = os.getenv("SHOPIFY_CLIENT_ID")
+CLIENT_SECRET = os.getenv("SHOPIFY_CLIENT_SECRET")
+REDIRECT_URI  = os.getenv("SHOPIFY_REDIRECT_URI")  # e.g. https://your-render-url.com/auth/callback
+
 
 
 def fetch_sessions_report():
@@ -126,6 +132,50 @@ def daily_session_report():
 def health():
     print(f"[{datetime.utcnow()}] Health check OK.", flush=True)
     return "OK", 200
+
+# API access token
+@app.route("/auth", methods=["GET"])
+def auth():
+    shop = request.args.get("shop", SHOPIFY_STORE_DOMAIN)
+    scopes = "read_orders,write_orders,read_all_orders,read_fulfillments,write_fulfillments,read_customers,write_customers"
+    auth_url = (
+        f"https://{shop}/admin/oauth/authorize"
+        f"?client_id={CLIENT_ID}"
+        f"&scope={scopes}"
+        f"&redirect_uri={REDIRECT_URI}"
+    )
+    from flask import redirect
+    return redirect(auth_url)
+
+
+@app.route("/auth/callback", methods=["GET"])
+def auth_callback():
+    code = request.args.get("code")
+    shop = request.args.get("shop")  # ← use shop from callback params
+
+    if not code:
+        return "No code received", 400
+    if not shop:
+        return "No shop received", 400
+
+    token_url = f"https://{shop}/admin/oauth/access_token"
+    response = requests.post(token_url, json={
+        "client_id":     CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "code":          code
+    })
+
+    print(f"🔑 Token exchange response: {response.status_code} — {response.text}", flush=True)
+
+    token_data = response.json()
+    access_token = token_data.get("access_token")
+    print(f"🔑 NEW ACCESS TOKEN: {access_token}", flush=True)
+
+    return jsonify({
+        "access_token": access_token,
+        "shop": shop,
+        "message": "Copy this token and update SHOPIFY_TOKEN in your airtable service on Render!"
+    })
 
 
 if __name__ == "__main__":
