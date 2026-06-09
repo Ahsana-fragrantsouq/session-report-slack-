@@ -32,7 +32,7 @@ def fetch_sessions_report():
       }
     }
     """
-    url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/2024-01/graphql.json"
+    url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/2025-01/graphql.json"
     headers = {
         "Content-Type": "application/json",
         "X-Shopify-Access-Token": SHOPIFY_ADMIN_API_TOKEN,
