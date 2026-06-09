@@ -25,7 +25,7 @@ def fetch_sessions(date_str):
     Returns list of dicts with keys: landing_page_type, landing_page_path,
     online_store_visitors, sessions.
     """
-    url = f"https://{SHOPIFY_STORE}/api/2024-01/graphql.json"
+    url = f"https://{SHOPIFY_STORE}/api/2026-04/graphql.json"
     print(f"[fetch_sessions] Querying Shopify for date: {date_str}", flush=True)
     print(f"[fetch_sessions] URL: {url}", flush=True)
 
@@ -65,6 +65,9 @@ def fetch_sessions(date_str):
     print(f"[fetch_sessions] Shopify response status: {resp.status_code}", flush=True)
     resp.raise_for_status()
     data = resp.json()
+    print(f"[fetch_sessions] Raw response keys: {list(data.keys())}", flush=True)
+    if "errors" in data:
+        print(f"[fetch_sessions] GraphQL errors: {data['errors']}", flush=True)
 
     shopify_data = data.get("data", {}).get("shopifyqlQuery", {})
 
