@@ -1,7 +1,8 @@
 import os
 import requests
-from datetime import datetime, timedelta
-from flask import Flask, request, jsonify
+from datetime import datetime, timedelta, timezone
+from collections import Counter
+from flask import Flask, request, jsonify, redirect
 
 app = Flask(__name__)
 
@@ -9,82 +10,79 @@ SHOPIFY_STORE_DOMAIN = os.environ.get("SHOPIFY_STORE_DOMAIN")
 SHOPIFY_ADMIN_API_TOKEN = os.environ.get("SHOPIFY_ADMIN_API_TOKEN")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
 
-# for API access token
 CLIENT_ID     = os.getenv("SHOPIFY_CLIENT_ID")
 CLIENT_SECRET = os.getenv("SHOPIFY_CLIENT_SECRET")
-REDIRECT_URI  = os.getenv("SHOPIFY_REDIRECT_URI")  # e.g. https://your-render-url.com/auth/callback
-
+REDIRECT_URI  = os.getenv("SHOPIFY_REDIRECT_URI")
 
 
 def fetch_sessions_report():
-    """Fetch yesterday's sessions by landing page from Shopify Analytics."""
+    """Fetch yesterday's visitor data using Shopify REST API."""
     print(f"[{datetime.utcnow()}] Fetching sessions report from Shopify...", flush=True)
     print(f"[{datetime.utcnow()}] Store domain: {SHOPIFY_STORE_DOMAIN}", flush=True)
 
-    query = """
-    {
-      shopifyqlQuery(query: "FROM sessions SHOW sessions BY landing_page_path SINCE -1d UNTIL today ORDER BY sessions DESC LIMIT 20") {
-        parseErrors { code message }
-        tableData {
-          rowData
-          columns { name dataType }
-        }
-      }
-    }
-    """
-    url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/2025-01/graphql.json"
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1))
+    date_min = yesterday.strftime("%Y-%m-%dT00:00:00Z")
+    date_max = yesterday.strftime("%Y-%m-%dT23:59:59Z")
+    date_str = yesterday.strftime("%d %b %Y")
+
     headers = {
-        "Content-Type": "application/json",
         "X-Shopify-Access-Token": SHOPIFY_ADMIN_API_TOKEN,
+        "Content-Type": "application/json",
     }
 
-    print(f"[{datetime.utcnow()}] Sending GraphQL request to: {url}", flush=True)
-    resp = requests.post(url, json={"query": query}, headers=headers, timeout=15)
-    print(f"[{datetime.utcnow()}] Shopify response status: {resp.status_code}", flush=True)
+    # Fetch yesterday's orders with landing_site info
+    url = (
+        f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/2025-01/orders.json"
+        f"?status=any&created_at_min={date_min}&created_at_max={date_max}"
+        f"&limit=250&fields=id,landing_site,referring_site"
+    )
+
+    print(f"[{datetime.utcnow()}] Fetching orders from: {url}", flush=True)
+    resp = requests.get(url, headers=headers, timeout=15)
+    print(f"[{datetime.utcnow()}] Response status: {resp.status_code}", flush=True)
+    print(f"[{datetime.utcnow()}] Response body (first 300 chars): {resp.text[:300]}", flush=True)
     resp.raise_for_status()
 
-    data = resp.json()
-    print(f"[{datetime.utcnow()}] Shopify response received successfully.", flush=True)
-    return data
+    orders = resp.json().get("orders", [])
+    print(f"[{datetime.utcnow()}] Total orders yesterday: {len(orders)}", flush=True)
+
+    return orders, date_str
 
 
-def build_slack_message(data):
-    """Format the session data into a Slack message."""
+def build_slack_message(orders, date_str):
+    """Format the orders data into a Slack message showing landing pages."""
     print(f"[{datetime.utcnow()}] Building Slack message...", flush=True)
 
-    yesterday_str = (datetime.utcnow() - timedelta(days=1)).strftime("%d %b %Y")
-
-    table = data["data"]["shopifyqlQuery"]["tableData"]
-    columns = [c["name"] for c in table["columns"]]
-    rows = table["rowData"]
-
-    print(f"[{datetime.utcnow()}] Total rows received: {len(rows)}", flush=True)
-
-    path_idx = columns.index("landing_page_path")
-    sessions_idx = columns.index("sessions")
+    # Count landing pages from orders
+    landing_counts = Counter()
+    for order in orders:
+        site = order.get("landing_site") or "/"
+        # Normalize: strip query strings
+        path = site.split("?")[0]
+        landing_counts[path] += 1
 
     lines = [
-        f"*📊 Today's Sessions — {yesterday_str}*",
+        f"*📊 Today's Sessions — {date_str}*",
+        f"_Based on {len(orders)} orders placed yesterday_",
         "",
     ]
 
-    for i, row in enumerate(rows):
-        path = row[path_idx]
-        count = row[sessions_idx]
-
-        if path == "/":
-            label = "🏠 Homepage"
-        elif "/products/" in path:
-            name = path.split("/products/")[-1].replace("-", " ").title()
-            label = f"🛍 {name}"
-        elif "/collections/" in path:
-            name = path.split("/collections/")[-1].replace("-", " ").title()
-            label = f"📂 {name}"
-        else:
-            label = f"📄 {path}"
-
-        print(f"[{datetime.utcnow()}] Row {i+1}: {label} → {count} sessions", flush=True)
-        lines.append(f"• {label}: *{count}*")
+    if not landing_counts:
+        lines.append("_No orders found for yesterday._")
+    else:
+        for i, (path, count) in enumerate(landing_counts.most_common(20)):
+            if path == "/" or path == "":
+                label = "🏠 Homepage"
+            elif "/products/" in path:
+                name = path.split("/products/")[-1].replace("-", " ").title()
+                label = f"🛍 {name}"
+            elif "/collections/" in path:
+                name = path.split("/collections/")[-1].replace("-", " ").title()
+                label = f"📂 {name}"
+            else:
+                label = f"📄 {path}"
+            print(f"[{datetime.utcnow()}] Row {i+1}: {label} → {count}", flush=True)
+            lines.append(f"• {label}: *{count}*")
 
     lines.append("")
     lines.append(f"_Generated at {datetime.utcnow().strftime('%H:%M')} UTC_")
@@ -97,16 +95,8 @@ def send_slack_report():
     """Fetch report and post to Slack."""
     print(f"[{datetime.utcnow()}] ========== Starting daily session report ==========", flush=True)
 
-    data = fetch_sessions_report()
-
-    errors = data["data"]["shopifyqlQuery"]["parseErrors"]
-    if errors:
-        print(f"[{datetime.utcnow()}] ShopifyQL parse errors: {errors}", flush=True)
-        return "ShopifyQL error", 500
-
-    print(f"[{datetime.utcnow()}] No ShopifyQL errors. Proceeding...", flush=True)
-
-    message = build_slack_message(data)
+    orders, date_str = fetch_sessions_report()
+    message = build_slack_message(orders, date_str)
 
     print(f"[{datetime.utcnow()}] Sending message to Slack...", flush=True)
     response = requests.post(SLACK_WEBHOOK_URL, json={"text": message}, timeout=10)
@@ -133,25 +123,24 @@ def health():
     print(f"[{datetime.utcnow()}] Health check OK.", flush=True)
     return "OK", 200
 
-# API access token
+
 @app.route("/auth", methods=["GET"])
 def auth():
     shop = request.args.get("shop", SHOPIFY_STORE_DOMAIN)
-    scopes = "read_analytics"
+    scopes = "read_analytics,read_orders"
     auth_url = (
         f"https://{shop}/admin/oauth/authorize"
         f"?client_id={CLIENT_ID}"
         f"&scope={scopes}"
         f"&redirect_uri={REDIRECT_URI}"
     )
-    from flask import redirect
     return redirect(auth_url)
 
 
 @app.route("/auth/callback", methods=["GET"])
 def auth_callback():
     code = request.args.get("code")
-    shop = request.args.get("shop")  # ← use shop from callback params
+    shop = request.args.get("shop")
 
     if not code:
         return "No code received", 400
@@ -165,50 +154,18 @@ def auth_callback():
         "code":          code
     })
 
-    print(f"🔑 Token exchange response: {response.status_code} — {response.text}", flush=True)
+    print(f"[{datetime.utcnow()}] Token exchange response: {response.status_code} — {response.text}", flush=True)
 
     token_data = response.json()
     access_token = token_data.get("access_token")
-    print(f"🔑 NEW ACCESS TOKEN: {access_token}", flush=True)
+    print(f"[{datetime.utcnow()}] NEW ACCESS TOKEN: {access_token}", flush=True)
 
     return jsonify({
         "access_token": access_token,
         "shop": shop,
-        "message": "Copy this token and update SHOPIFY_TOKEN in your airtable service on Render!"
+        "message": "Copy this token and set it as SHOPIFY_ADMIN_API_TOKEN on Render!"
     })
 
-def fetch_sessions_report():
-    print(f"[{datetime.utcnow()}] Fetching sessions report from Shopify...", flush=True)
-    print(f"[{datetime.utcnow()}] Store domain: {SHOPIFY_STORE_DOMAIN}", flush=True)
-
-    query = """
-    {
-      shopifyqlQuery(query: "FROM sessions SHOW sessions BY landing_page_path SINCE -1d UNTIL today ORDER BY sessions DESC LIMIT 20") {
-        parseErrors { code message }
-        tableData {
-          rowData
-          columns { name dataType }
-        }
-      }
-    }
-    """
-    url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/2024-01/graphql.json"
-    headers = {
-        "Content-Type": "application/json",
-        "X-Shopify-Access-Token": SHOPIFY_ADMIN_API_TOKEN,
-    }
-
-    print(f"[{datetime.utcnow()}] Sending GraphQL request to: {url}", flush=True)
-    resp = requests.post(url, json={"query": query}, headers=headers, timeout=15)
-    print(f"[{datetime.utcnow()}] Shopify response status: {resp.status_code}", flush=True)
-    
-    # ADD THIS LINE:
-    print(f"[{datetime.utcnow()}] Shopify response body: {resp.text}", flush=True)
-    
-    resp.raise_for_status()
-    data = resp.json()
-    print(f"[{datetime.utcnow()}] Shopify response received successfully.", flush=True)
-    return data
 
 if __name__ == "__main__":
     app.run(debug=False)
