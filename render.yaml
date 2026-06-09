@@ -1,13 +1,15 @@
 services:
   - type: web
-    name: shopify-slack-reports
-    runtime: python
+    name: session-slack
+    env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --timeout 60
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 2
     envVars:
-      - key: SHOPIFY_STORE_DOMAIN
+      - key: SHOPIFY_STORE
+        value: fragrantsouq.myshopify.com
+      - key: SHOPIFY_ACCESS_TOKEN
         sync: false
-      - key: SHOPIFY_ADMIN_API_TOKEN
+      - key: SLACK_BOT_TOKEN
         sync: false
-      - key: SLACK_WEBHOOK_URL
-        sync: false
+      - key: SLACK_CHANNEL_ID
+        value: C0B9V9U312L

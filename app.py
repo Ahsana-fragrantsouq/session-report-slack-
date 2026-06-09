@@ -1,171 +1,249 @@
 import os
+import io
 import requests
-from datetime import datetime, timedelta, timezone
-from collections import Counter
-from flask import Flask, request, jsonify, redirect
+import openpyxl
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+from flask import Flask, jsonify
+from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__)
 
-SHOPIFY_STORE_DOMAIN = os.environ.get("SHOPIFY_STORE_DOMAIN")
-SHOPIFY_ADMIN_API_TOKEN = os.environ.get("SHOPIFY_ADMIN_API_TOKEN")
-SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
+# ── ENV VARS ──────────────────────────────────────────────────────────────────
+SHOPIFY_STORE        = os.environ.get("SHOPIFY_STORE", "fragrantsouq.myshopify.com")
+SHOPIFY_ACCESS_TOKEN = os.environ.get("SHOPIFY_ACCESS_TOKEN")   # shpat_...
+SLACK_BOT_TOKEN      = os.environ.get("SLACK_BOT_TOKEN")        # xoxb-...
+SLACK_CHANNEL_ID     = os.environ.get("SLACK_CHANNEL_ID", "C0B9V9U312L")
 
-CLIENT_ID     = os.getenv("SHOPIFY_CLIENT_ID")
-CLIENT_SECRET = os.getenv("SHOPIFY_CLIENT_SECRET")
-REDIRECT_URI  = os.getenv("SHOPIFY_REDIRECT_URI")
+IST = ZoneInfo("Asia/Kolkata")
 
 
-def fetch_sessions_report():
-    """Fetch yesterday's visitor data using Shopify REST API."""
-    print(f"[{datetime.utcnow()}] Fetching sessions report from Shopify...", flush=True)
-    print(f"[{datetime.utcnow()}] Store domain: {SHOPIFY_STORE_DOMAIN}", flush=True)
+# ── SHOPIFY: fetch sessions by landing page ───────────────────────────────────
+def fetch_sessions(date_str):
+    """
+    Runs a ShopifyQL query for sessions by landing page on a given date (YYYY-MM-DD).
+    Returns list of dicts with keys: landing_page_type, landing_page_path,
+    online_store_visitors, sessions.
+    """
+    url = f"https://{SHOPIFY_STORE}/api/2024-01/graphql.json"
+    print(f"[fetch_sessions] Querying Shopify for date: {date_str}", flush=True)
+    print(f"[fetch_sessions] URL: {url}", flush=True)
 
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1))
-    date_min = yesterday.strftime("%Y-%m-%dT00:00:00Z")
-    date_max = yesterday.strftime("%Y-%m-%dT23:59:59Z")
-    date_str = yesterday.strftime("%d %b %Y")
+    query = f"""
+    {{
+      shopifyqlQuery(query: \"\"\"
+        FROM sessions
+        SHOW landing_page_type, landing_page_path,
+             online_store_visitors, sessions
+        SINCE {date_str}
+        UNTIL {date_str}
+        ORDER BY sessions DESC
+      \"\"\") {{
+        ... on TableResponse {{
+          tableData {{
+            columns {{
+              name
+            }}
+            rowData
+          }}
+        }}
+        parseErrors {{
+          code
+          message
+        }}
+      }}
+    }}
+    """
 
     headers = {
-        "X-Shopify-Access-Token": SHOPIFY_ADMIN_API_TOKEN,
         "Content-Type": "application/json",
+        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
     }
 
-    # Fetch yesterday's orders with landing_site info
-    url = (
-        f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/2025-01/orders.json"
-        f"?status=any&created_at_min={date_min}&created_at_max={date_max}"
-        f"&limit=250&fields=id,landing_site,referring_site"
-    )
-
-    print(f"[{datetime.utcnow()}] Fetching orders from: {url}", flush=True)
-    resp = requests.get(url, headers=headers, timeout=15)
-    print(f"[{datetime.utcnow()}] Response status: {resp.status_code}", flush=True)
-    print(f"[{datetime.utcnow()}] Response body (first 300 chars): {resp.text[:300]}", flush=True)
+    print(f"[fetch_sessions] Sending GraphQL request to Shopify...", flush=True)
+    resp = requests.post(url, json={"query": query}, headers=headers, timeout=30)
+    print(f"[fetch_sessions] Shopify response status: {resp.status_code}", flush=True)
     resp.raise_for_status()
+    data = resp.json()
 
-    orders = resp.json().get("orders", [])
-    print(f"[{datetime.utcnow()}] Total orders yesterday: {len(orders)}", flush=True)
+    shopify_data = data.get("data", {}).get("shopifyqlQuery", {})
 
-    return orders, date_str
+    parse_errors = shopify_data.get("parseErrors", [])
+    if parse_errors:
+        print(f"[fetch_sessions] ERROR - ShopifyQL parse errors: {parse_errors}", flush=True)
+        raise ValueError(f"ShopifyQL parse errors: {parse_errors}")
 
+    table = shopify_data.get("tableData", {})
+    if not table:
+        print(f"[fetch_sessions] WARNING - No tableData returned from Shopify. Possibly no sessions for {date_str}.", flush=True)
+        return []
 
-def build_slack_message(orders, date_str):
-    """Format the orders data into a Slack message showing landing pages."""
-    print(f"[{datetime.utcnow()}] Building Slack message...", flush=True)
+    columns = [col["name"] for col in table.get("columns", [])]
+    rows    = table.get("rowData", [])
 
-    # Count landing pages from orders
-    landing_counts = Counter()
-    for order in orders:
-        site = order.get("landing_site") or "/"
-        # Normalize: strip query strings
-        path = site.split("?")[0]
-        landing_counts[path] += 1
+    print(f"[fetch_sessions] Columns returned: {columns}", flush=True)
+    print(f"[fetch_sessions] Total rows returned by Shopify: {len(rows)}", flush=True)
 
-    lines = [
-        f"*📊 Today's Sessions — {date_str}*",
-        f"_Based on {len(orders)} orders placed yesterday_",
-        "",
-    ]
+    results = []
+    for row in rows:
+        record = dict(zip(columns, row))
+        results.append(record)
 
-    if not landing_counts:
-        lines.append("_No orders found for yesterday._")
-    else:
-        for i, (path, count) in enumerate(landing_counts.most_common(20)):
-            if path == "/" or path == "":
-                label = "🏠 Homepage"
-            elif "/products/" in path:
-                name = path.split("/products/")[-1].replace("-", " ").title()
-                label = f"🛍 {name}"
-            elif "/collections/" in path:
-                name = path.split("/collections/")[-1].replace("-", " ").title()
-                label = f"📂 {name}"
-            else:
-                label = f"📄 {path}"
-            print(f"[{datetime.utcnow()}] Row {i+1}: {label} → {count}", flush=True)
-            lines.append(f"• {label}: *{count}*")
-
-    lines.append("")
-    lines.append(f"_Generated at {datetime.utcnow().strftime('%H:%M')} UTC_")
-
-    print(f"[{datetime.utcnow()}] Slack message built successfully.", flush=True)
-    return "\n".join(lines)
+    print(f"[fetch_sessions] Successfully parsed {len(results)} rows.", flush=True)
+    return results
 
 
-def send_slack_report():
-    """Fetch report and post to Slack."""
-    print(f"[{datetime.utcnow()}] ========== Starting daily session report ==========", flush=True)
+# ── BUILD EXCEL ───────────────────────────────────────────────────────────────
+def build_excel(rows, date_str):
+    """
+    Filters Product rows, keeps 3 columns, returns Excel bytes.
+    """
+    print(f"[build_excel] Starting Excel build for {date_str}. Input rows: {len(rows)}", flush=True)
 
-    orders, date_str = fetch_sessions_report()
-    message = build_slack_message(orders, date_str)
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sessions by Landing Page"
 
-    print(f"[{datetime.utcnow()}] Sending message to Slack...", flush=True)
-    response = requests.post(SLACK_WEBHOOK_URL, json={"text": message}, timeout=10)
-    print(f"[{datetime.utcnow()}] Slack response status: {response.status_code}", flush=True)
-    response.raise_for_status()
+    # Header
+    headers = ["Landing page path", "Online store visitors", "Sessions"]
+    ws.append(headers)
 
-    print(f"[{datetime.utcnow()}] ========== Daily session report sent successfully ==========", flush=True)
-    return "OK"
+    # Style header row
+    from openpyxl.styles import Font, PatternFill, Alignment
+    header_fill = PatternFill("solid", fgColor="1F4E79")
+    for cell in ws[1]:
+        cell.font      = Font(bold=True, color="FFFFFF")
+        cell.fill      = header_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    # Data rows — only Product type
+    count = 0
+    skipped = 0
+    for r in rows:
+        page_type = str(r.get("landing_page_type", "")).strip().lower()
+        if page_type != "product":
+            print(f"[build_excel] Skipping row — type='{page_type}', path='{r.get('landing_page_path', '')}'", flush=True)
+            skipped += 1
+            continue
+        ws.append([
+            r.get("landing_page_path", ""),
+            r.get("online_store_visitors", 0),
+            r.get("sessions", 0),
+        ])
+        count += 1
+
+    print(f"[build_excel] Rows added (Product): {count} | Rows skipped (non-Product): {skipped}", flush=True)
+
+    # Column widths
+    ws.column_dimensions["A"].width = 70
+    ws.column_dimensions["B"].width = 22
+    ws.column_dimensions["C"].width = 12
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    excel_size_kb = round(len(buf.getvalue()) / 1024, 2)
+    print(f"[build_excel] Excel file built successfully. Size: {excel_size_kb} KB", flush=True)
+    return buf.getvalue(), count
 
 
-@app.route("/trigger/daily-session-report", methods=["GET", "POST"])
-def daily_session_report():
-    print(f"[{datetime.utcnow()}] /trigger/daily-session-report endpoint hit.", flush=True)
-    try:
-        result = send_slack_report()
-        return result, 200
-    except Exception as e:
-        print(f"[{datetime.utcnow()}] ERROR: {e}", flush=True)
-        return f"Error: {str(e)}", 500
+# ── SEND TO SLACK ─────────────────────────────────────────────────────────────
+def send_to_slack(excel_bytes, date_str, row_count):
+    filename = f"sessions_by_landing_page_{date_str}.xlsx"
+    print(f"[send_to_slack] Preparing to upload '{filename}' to Slack channel {SLACK_CHANNEL_ID}", flush=True)
+    print(f"[send_to_slack] File size: {round(len(excel_bytes)/1024, 2)} KB | Product rows: {row_count}", flush=True)
 
-
-@app.route("/health", methods=["GET"])
-def health():
-    print(f"[{datetime.utcnow()}] Health check OK.", flush=True)
-    return "OK", 200
-
-
-@app.route("/auth", methods=["GET"])
-def auth():
-    shop = request.args.get("shop", SHOPIFY_STORE_DOMAIN)
-    scopes = "read_analytics,read_orders"
-    auth_url = (
-        f"https://{shop}/admin/oauth/authorize"
-        f"?client_id={CLIENT_ID}"
-        f"&scope={scopes}"
-        f"&redirect_uri={REDIRECT_URI}"
+    # 1. Upload file
+    print(f"[send_to_slack] Calling Slack files.upload API...", flush=True)
+    upload_resp = requests.post(
+        "https://slack.com/api/files.upload",
+        headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
+        data={
+            "channels": SLACK_CHANNEL_ID,
+            "filename": filename,
+            "initial_comment": (
+                f":bar_chart: *Sessions by Landing Page — {date_str}*\n"
+                f"Product pages: *{row_count} rows* | Columns: Landing page path, Online store visitors, Sessions"
+            ),
+        },
+        files={"file": (filename, excel_bytes,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        timeout=30,
     )
-    return redirect(auth_url)
+    print(f"[send_to_slack] Slack API response status: {upload_resp.status_code}", flush=True)
+    upload_resp.raise_for_status()
+    result = upload_resp.json()
+
+    if not result.get("ok"):
+        print(f"[send_to_slack] ERROR - Slack upload failed. Response: {result}", flush=True)
+        raise RuntimeError(f"Slack upload failed: {result.get('error')}")
+
+    file_id = result.get("file", {}).get("id", "unknown")
+    print(f"[send_to_slack] SUCCESS - File uploaded to Slack. File ID: {file_id}", flush=True)
+    print(f"[session-slack] Sent {row_count} product rows for {date_str} to Slack.", flush=True)
 
 
-@app.route("/auth/callback", methods=["GET"])
-def auth_callback():
-    code = request.args.get("code")
-    shop = request.args.get("shop")
+# ── MAIN JOB ──────────────────────────────────────────────────────────────────
+def run_job():
+    print(f"[run_job] ─────────────────────────────────────────", flush=True)
+    print(f"[run_job] Job started at {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}", flush=True)
+    try:
+        yesterday = (datetime.now(IST) - timedelta(days=1)).strftime("%Y-%m-%d")
+        print(f"[run_job] Target date (yesterday): {yesterday}", flush=True)
 
-    if not code:
-        return "No code received", 400
-    if not shop:
-        return "No shop received", 400
+        rows = fetch_sessions(yesterday)
+        print(f"[run_job] Got {len(rows)} total rows from Shopify.", flush=True)
 
-    token_url = f"https://{shop}/admin/oauth/access_token"
-    response = requests.post(token_url, json={
-        "client_id":     CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "code":          code
-    })
+        excel_bytes, count = build_excel(rows, yesterday)
+        print(f"[run_job] Filtered to {count} Product rows.", flush=True)
 
-    print(f"[{datetime.utcnow()}] Token exchange response: {response.status_code} — {response.text}", flush=True)
+        send_to_slack(excel_bytes, yesterday, count)
+        print(f"[run_job] Job completed successfully.", flush=True)
 
-    token_data = response.json()
-    access_token = token_data.get("access_token")
-    print(f"[{datetime.utcnow()}] NEW ACCESS TOKEN: {access_token}", flush=True)
+    except Exception as e:
+        print(f"[run_job] ERROR: {e}", flush=True)
+    print(f"[run_job] ─────────────────────────────────────────", flush=True)
 
-    return jsonify({
-        "access_token": access_token,
-        "shop": shop,
-        "message": "Copy this token and set it as SHOPIFY_ADMIN_API_TOKEN on Render!"
-    })
 
+# ── FLASK ROUTES ──────────────────────────────────────────────────────────────
+@app.route("/health")
+def health():
+    print(f"[health] Health check called at {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}", flush=True)
+    return jsonify({"status": "ok"})
+
+
+@app.route("/run-now")
+def run_now():
+    """Trigger the job manually for testing."""
+    print(f"[run-now] Manual trigger called at {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}", flush=True)
+    run_job()
+    return jsonify({"status": "done"})
+
+
+@app.route("/run-date/<date_str>")
+def run_date(date_str):
+    """Fetch a specific date. Format: YYYY-MM-DD  e.g. /run-date/2026-06-07"""
+    print(f"[run-date] Manual date trigger called for: {date_str}", flush=True)
+    try:
+        rows = fetch_sessions(date_str)
+        excel_bytes, count = build_excel(rows, date_str)
+        send_to_slack(excel_bytes, date_str, count)
+        print(f"[run-date] Completed for {date_str}. Product rows: {count}", flush=True)
+        return jsonify({"status": "done", "product_rows": count, "date": date_str})
+    except Exception as e:
+        print(f"[run-date] ERROR for {date_str}: {e}", flush=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ── SCHEDULER ─────────────────────────────────────────────────────────────────
+scheduler = BackgroundScheduler(timezone=IST)
+scheduler.add_job(run_job, "cron", hour=9, minute=0)
+scheduler.start()
+print(f"[startup] Scheduler started. Job will run daily at 09:00 IST.", flush=True)
+print(f"[startup] SHOPIFY_STORE     : {SHOPIFY_STORE}", flush=True)
+print(f"[startup] SHOPIFY_TOKEN set : {'YES' if SHOPIFY_ACCESS_TOKEN else 'NO ⚠️'}", flush=True)
+print(f"[startup] SLACK_TOKEN set   : {'YES' if SLACK_BOT_TOKEN else 'NO ⚠️'}", flush=True)
+print(f"[startup] SLACK_CHANNEL_ID  : {SLACK_CHANNEL_ID}", flush=True)
 
 if __name__ == "__main__":
-    app.run(debug=False)
+    app.run(host="0.0.0.0", port=5000)
