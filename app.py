@@ -150,36 +150,63 @@ def build_excel(rows, date_str):
 # ── SEND TO SLACK ─────────────────────────────────────────────────────────────
 def send_to_slack(excel_bytes, date_str, row_count):
     filename = f"sessions_by_landing_page_{date_str}.xlsx"
+    file_size = len(excel_bytes)
     print(f"[send_to_slack] Preparing to upload '{filename}' to Slack channel {SLACK_CHANNEL_ID}", flush=True)
-    print(f"[send_to_slack] File size: {round(len(excel_bytes)/1024, 2)} KB | Product rows: {row_count}", flush=True)
+    print(f"[send_to_slack] File size: {round(file_size/1024, 2)} KB | Product rows: {row_count}", flush=True)
 
-    # 1. Upload file
-    print(f"[send_to_slack] Calling Slack files.upload API...", flush=True)
-    upload_resp = requests.post(
-        "https://slack.com/api/files.upload",
+    # Step 1 — Get upload URL
+    print(f"[send_to_slack] Step 1: Requesting upload URL from Slack...", flush=True)
+    url_resp = requests.post(
+        "https://slack.com/api/files.getUploadURLExternal",
         headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
-        data={
-            "channels": SLACK_CHANNEL_ID,
-            "filename": filename,
+        data={"filename": filename, "length": file_size},
+        timeout=30,
+    )
+    url_resp.raise_for_status()
+    url_result = url_resp.json()
+    print(f"[send_to_slack] Step 1 response: ok={url_result.get('ok')} error={url_result.get('error','none')}", flush=True)
+
+    if not url_result.get("ok"):
+        raise RuntimeError(f"Slack getUploadURLExternal failed: {url_result.get('error')}")
+
+    upload_url = url_result["upload_url"]
+    file_id    = url_result["file_id"]
+    print(f"[send_to_slack] Got upload URL. File ID: {file_id}", flush=True)
+
+    # Step 2 — Upload file bytes to the upload URL
+    print(f"[send_to_slack] Step 2: Uploading file bytes...", flush=True)
+    upload_resp = requests.post(
+        upload_url,
+        files={"file": (filename, excel_bytes,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        timeout=60,
+    )
+    upload_resp.raise_for_status()
+    print(f"[send_to_slack] Step 2 done. HTTP status: {upload_resp.status_code}", flush=True)
+
+    # Step 3 — Complete upload and share to channel
+    print(f"[send_to_slack] Step 3: Completing upload and posting to channel...", flush=True)
+    complete_resp = requests.post(
+        "https://slack.com/api/files.completeUploadExternal",
+        headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
+        json={
+            "files": [{"id": file_id, "title": filename}],
+            "channel_id": SLACK_CHANNEL_ID,
             "initial_comment": (
                 f":bar_chart: *Sessions by Landing Page — {date_str}*\n"
                 f"Product pages: *{row_count} rows* | Columns: Landing page path, Online store visitors, Sessions"
             ),
         },
-        files={"file": (filename, excel_bytes,
-                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
         timeout=30,
     )
-    print(f"[send_to_slack] Slack API response status: {upload_resp.status_code}", flush=True)
-    upload_resp.raise_for_status()
-    result = upload_resp.json()
+    complete_resp.raise_for_status()
+    complete_result = complete_resp.json()
+    print(f"[send_to_slack] Step 3 response: ok={complete_result.get('ok')} error={complete_result.get('error','none')}", flush=True)
 
-    if not result.get("ok"):
-        print(f"[send_to_slack] ERROR - Slack upload failed. Response: {result}", flush=True)
-        raise RuntimeError(f"Slack upload failed: {result.get('error')}")
+    if not complete_result.get("ok"):
+        raise RuntimeError(f"Slack completeUploadExternal failed: {complete_result.get('error')}")
 
-    file_id = result.get("file", {}).get("id", "unknown")
-    print(f"[send_to_slack] SUCCESS - File uploaded to Slack. File ID: {file_id}", flush=True)
+    print(f"[send_to_slack] SUCCESS - File posted to Slack channel. File ID: {file_id}", flush=True)
     print(f"[session-slack] Sent {row_count} product rows for {date_str} to Slack.", flush=True)
 
 
