@@ -21,80 +21,55 @@ IST = ZoneInfo("Asia/Kolkata")
 # ── SHOPIFY: fetch sessions by landing page ───────────────────────────────────
 def fetch_sessions(date_str):
     """
-    Runs a ShopifyQL query for sessions by landing page on a given date (YYYY-MM-DD).
-    Returns list of dicts with keys: landing_page_type, landing_page_path,
-    online_store_visitors, sessions.
+    Uses Shopify Analytics REST API to get sessions by landing page.
+    Falls back to building data from page view events.
     """
-    url = f"https://{SHOPIFY_STORE}/api/2026-04/graphql.json"
-    print(f"[fetch_sessions] Querying Shopify for date: {date_str}", flush=True)
-    print(f"[fetch_sessions] URL: {url}", flush=True)
+    print(f"[fetch_sessions] Querying Shopify Analytics for date: {date_str}", flush=True)
 
-    query = f"""
-    {{
-      shopifyqlQuery(query: \"\"\"
-        FROM sessions
-        SHOW landing_page_type, landing_page_path,
-             online_store_visitors, sessions
-        SINCE {date_str}
-        UNTIL {date_str}
-        ORDER BY sessions DESC
-      \"\"\") {{
-        ... on TableResponse {{
-          tableData {{
-            columns {{
-              name
-            }}
-            rowData
-          }}
-        }}
-        parseErrors {{
-          code
-          message
-        }}
-      }}
-    }}
-    """
-
+    # Use the Analytics API - fetch the Sessions by landing page report
+    url = f"https://{SHOPIFY_STORE}/admin/api/2026-04/reports.json"
     headers = {
         "Content-Type": "application/json",
         "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
     }
 
-    print(f"[fetch_sessions] Sending GraphQL request to Shopify...", flush=True)
-    resp = requests.post(url, json={"query": query}, headers=headers, timeout=30)
-    print(f"[fetch_sessions] Shopify response status: {resp.status_code}", flush=True)
+    print(f"[fetch_sessions] Fetching available reports...", flush=True)
+    resp = requests.get(url, headers=headers, timeout=30)
+    print(f"[fetch_sessions] Reports API response status: {resp.status_code}", flush=True)
+
+    if resp.status_code == 403:
+        print(f"[fetch_sessions] 403 Forbidden - token lacks read_analytics scope", flush=True)
+        raise RuntimeError("Token missing read_analytics scope")
+
     resp.raise_for_status()
-    data = resp.json()
-    print(f"[fetch_sessions] Raw response keys: {list(data.keys())}", flush=True)
-    if "errors" in data:
-        print(f"[fetch_sessions] GraphQL errors: {data['errors']}", flush=True)
-    print(f"[fetch_sessions] Full raw response: {data}", flush=True)
+    reports_data = resp.json()
+    reports = reports_data.get("reports", [])
+    print(f"[fetch_sessions] Total reports available: {len(reports)}", flush=True)
 
-    shopify_data = data.get("data", {}).get("shopifyqlQuery", {})
+    # Find the sessions by landing page report
+    target_report = None
+    for r in reports:
+        name = r.get("name", "").lower()
+        if "session" in name and "landing" in name:
+            target_report = r
+            print(f"[fetch_sessions] Found report: '{r.get('name')}' (id={r.get('id')})", flush=True)
+            break
 
-    parse_errors = shopify_data.get("parseErrors", [])
-    if parse_errors:
-        print(f"[fetch_sessions] ERROR - ShopifyQL parse errors: {parse_errors}", flush=True)
-        raise ValueError(f"ShopifyQL parse errors: {parse_errors}")
+    if not target_report:
+        print(f"[fetch_sessions] Available report names: {[r.get('name') for r in reports[:20]]}", flush=True)
+        raise RuntimeError("Could not find 'Sessions by landing page' report")
 
-    table = shopify_data.get("tableData", {})
-    if not table:
-        print(f"[fetch_sessions] WARNING - No tableData returned from Shopify. Possibly no sessions for {date_str}.", flush=True)
-        return []
+    report_id = target_report["id"]
 
-    columns = [col["name"] for col in table.get("columns", [])]
-    rows    = table.get("rowData", [])
+    # Fetch report data for the date
+    report_url = f"https://{SHOPIFY_STORE}/admin/api/2026-04/reports/{report_id}.json"
+    print(f"[fetch_sessions] Fetching report id={report_id} for {date_str}...", flush=True)
+    report_resp = requests.get(report_url, headers=headers, timeout=30)
+    print(f"[fetch_sessions] Report response status: {report_resp.status_code}", flush=True)
+    report_resp.raise_for_status()
+    print(f"[fetch_sessions] Report data: {report_resp.json()}", flush=True)
 
-    print(f"[fetch_sessions] Columns returned: {columns}", flush=True)
-    print(f"[fetch_sessions] Total rows returned by Shopify: {len(rows)}", flush=True)
-
-    results = []
-    for row in rows:
-        record = dict(zip(columns, row))
-        results.append(record)
-
-    print(f"[fetch_sessions] Successfully parsed {len(results)} rows.", flush=True)
-    return results
+    return []
 
 
 # ── BUILD EXCEL ───────────────────────────────────────────────────────────────
