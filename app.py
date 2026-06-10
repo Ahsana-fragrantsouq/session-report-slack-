@@ -58,11 +58,16 @@ def fetch_sessions(date_str):
       }
     }
     """
-    ir2 = requests.post(url, json={"query": introspect2}, headers=headers, timeout=30)
-    idata2 = ir2.json()
-    tdata_fields = idata2.get("data", {}).get("__type", {}).get("fields", [])
-    for f in tdata_fields:
-        print(f"[fetch_sessions] Field '{f['name']}' type: {f['type']}", flush=True)
+    try:
+        ir2 = requests.post(url, json={"query": introspect2}, headers=headers, timeout=30)
+        print(f"[fetch_sessions] Introspect2 status: {ir2.status_code}", flush=True)
+        idata2 = ir2.json()
+        print(f"[fetch_sessions] Introspect2 raw: {idata2}", flush=True)
+        tdata_fields = idata2.get("data", {}).get("__type", {}).get("fields", [])
+        for f in tdata_fields:
+            print(f"[fetch_sessions] Field '{f['name']}' type: {f['type']}", flush=True)
+    except Exception as e2:
+        print(f"[fetch_sessions] Introspect2 error: {e2}", flush=True)
 
     query = """
     {
