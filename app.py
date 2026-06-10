@@ -43,18 +43,26 @@ def fetch_sessions(date_str):
     fields = [f["name"] for f in idata.get("data", {}).get("__type", {}).get("fields", [])]
     print(f"[fetch_sessions] ShopifyqlTableData fields: {fields}", flush=True)
 
-    # Introspect ShopifyqlRow to find its fields
+    # Introspect rows field type on ShopifyqlTableData
     introspect2 = """
     {
-      __type(name: "ShopifyqlRow") {
-        fields { name }
+      __type(name: "ShopifyqlTableData") {
+        fields {
+          name
+          type {
+            name
+            kind
+            ofType { name kind ofType { name kind } }
+          }
+        }
       }
     }
     """
     ir2 = requests.post(url, json={"query": introspect2}, headers=headers, timeout=30)
     idata2 = ir2.json()
-    row_fields = [f["name"] for f in idata2.get("data", {}).get("__type", {}).get("fields", [])]
-    print(f"[fetch_sessions] ShopifyqlRow fields: {row_fields}", flush=True)
+    tdata_fields = idata2.get("data", {}).get("__type", {}).get("fields", [])
+    for f in tdata_fields:
+        print(f"[fetch_sessions] Field '{f['name']}' type: {f['type']}", flush=True)
 
     query = """
     {
