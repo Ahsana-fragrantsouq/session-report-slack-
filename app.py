@@ -20,75 +20,13 @@ IST = ZoneInfo("Asia/Kolkata")
 
 # ── SHOPIFY: fetch sessions by landing page ───────────────────────────────────
 def fetch_sessions(date_str):
-    print(f"[fetch_sessions] Querying Shopify Admin API for date: {date_str}", flush=True)
+    print(f"[fetch_sessions] Querying Shopify for date: {date_str}", flush=True)
 
     url = f"https://{SHOPIFY_STORE}/admin/api/2026-04/graphql.json"
-    print(f"[fetch_sessions] URL: {url}", flush=True)
-
     headers = {
         "Content-Type": "application/json",
         "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
     }
-
-    # First introspect to find correct field names on ShopifyqlTableData
-    introspect = """
-    {
-      __type(name: "ShopifyqlTableData") {
-        fields { name }
-      }
-    }
-    """
-    ir = requests.post(url, json={"query": introspect}, headers=headers, timeout=30)
-    idata = ir.json()
-    fields = [f["name"] for f in idata.get("data", {}).get("__type", {}).get("fields", [])]
-    print(f"[fetch_sessions] ShopifyqlTableData fields: {fields}", flush=True)
-
-    # Introspect rows field type on ShopifyqlTableData
-    introspect2 = """
-    {
-      __type(name: "ShopifyqlTableData") {
-        fields {
-          name
-          type {
-            name
-            kind
-            ofType { name kind ofType { name kind } }
-          }
-        }
-      }
-    }
-    """
-    try:
-        ir2 = requests.post(url, json={"query": introspect2}, headers=headers, timeout=30)
-        print(f"[fetch_sessions] Introspect2 status: {ir2.status_code}", flush=True)
-        idata2 = ir2.json()
-        print(f"[fetch_sessions] Introspect2 raw: {idata2}", flush=True)
-        tdata_fields = idata2.get("data", {}).get("__type", {}).get("fields", [])
-        for f in tdata_fields:
-            print(f"[fetch_sessions] Field '{f['name']}' type: {f['type']}", flush=True)
-    except Exception as e2:
-        print(f"[fetch_sessions] Introspect2 error: {e2}", flush=True)
-
-    # Test with explicit date string AND today to see which returns data
-    for test_since, test_until, label in [
-        (date_str, date_str, f"explicit {date_str}"),
-        ("-1d", "-1d", "relative -1d"),
-        ("-7d", "0d", "last 7 days"),
-    ]:
-        test_query = f"""
-        {{
-          shopifyqlQuery(query: "FROM sessions SHOW landing_page_type, landing_page_path, online_store_visitors, sessions SINCE {test_since} UNTIL {test_until} GROUP BY landing_page_type, landing_page_path ORDER BY sessions DESC") {{
-            tableData {{ columns {{ name }} rows }}
-            parseErrors
-          }}
-        }}
-        """
-        tr = requests.post(url, json={"query": test_query}, headers=headers, timeout=30)
-        td = tr.json()
-        tq = td.get("data", {}).get("shopifyqlQuery", {})
-        rows_count = len((tq.get("tableData") or {}).get("rows") or [])
-        cols = [(tq.get("tableData") or {}).get("columns") or []]
-        print(f"[fetch_sessions] Test '{label}': rows={rows_count}, parseErrors={tq.get('parseErrors')}, graphql_errors={td.get('errors')}", flush=True)
 
     query = f"""
     {{
@@ -106,14 +44,12 @@ def fetch_sessions(date_str):
     resp = requests.post(url, json={"query": query}, headers=headers, timeout=30)
     print(f"[fetch_sessions] Response status: {resp.status_code}", flush=True)
     data = resp.json()
-    print(f"[fetch_sessions] Raw response keys: {list(data.keys())}", flush=True)
 
     if "errors" in data:
         print(f"[fetch_sessions] GraphQL errors: {data['errors']}", flush=True)
         raise RuntimeError(f"GraphQL errors: {data['errors']}")
 
     shopify_data = data.get("data", {}).get("shopifyqlQuery", {})
-    print(f"[fetch_sessions] shopifyqlQuery response: {shopify_data}", flush=True)
     parse_errors = shopify_data.get("parseErrors")
     if parse_errors:
         print(f"[fetch_sessions] ShopifyQL parse errors: {parse_errors}", flush=True)
@@ -121,17 +57,14 @@ def fetch_sessions(date_str):
 
     table = shopify_data.get("tableData", {})
     if not table:
-        print(f"[fetch_sessions] WARNING - No tableData returned from Shopify.", flush=True)
+        print(f"[fetch_sessions] WARNING - No tableData returned.", flush=True)
         return []
 
     columns = [col["name"] for col in table.get("columns", [])]
     rows    = table.get("rows", [])
     print(f"[fetch_sessions] Columns: {columns}", flush=True)
     print(f"[fetch_sessions] Total rows: {len(rows)}", flush=True)
-    if rows:
-        print(f"[fetch_sessions] First row sample: {rows[0]}", flush=True)
 
-    # rows is a JSON scalar — each row is a list of values matching columns order
     results = []
     for row in rows:
         if isinstance(row, list):
