@@ -71,7 +71,7 @@ def fetch_sessions(date_str):
 
     query = """
     {
-      shopifyqlQuery(query: "FROM sessions SHOW landing_page_type, landing_page_path, online_store_visitors, sessions SINCE -1d UNTIL -1d ORDER BY sessions DESC") {
+      shopifyqlQuery(query: "FROM sessions SHOW landing_page_type, landing_page_path, online_store_visitors, sessions SINCE -1d UNTIL -1d GROUP BY landing_page_type, landing_page_path ORDER BY sessions DESC") {
         tableData {
           columns { name }
           rows
