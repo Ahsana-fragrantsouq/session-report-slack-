@@ -43,12 +43,27 @@ def fetch_sessions(date_str):
     fields = [f["name"] for f in idata.get("data", {}).get("__type", {}).get("fields", [])]
     print(f"[fetch_sessions] ShopifyqlTableData fields: {fields}", flush=True)
 
+    # Introspect ShopifyqlRow to find its fields
+    introspect2 = """
+    {
+      __type(name: "ShopifyqlRow") {
+        fields { name }
+      }
+    }
+    """
+    ir2 = requests.post(url, json={"query": introspect2}, headers=headers, timeout=30)
+    idata2 = ir2.json()
+    row_fields = [f["name"] for f in idata2.get("data", {}).get("__type", {}).get("fields", [])]
+    print(f"[fetch_sessions] ShopifyqlRow fields: {row_fields}", flush=True)
+
     query = """
     {
       shopifyqlQuery(query: "FROM sessions SHOW landing_page_type, landing_page_path, online_store_visitors, sessions SINCE -1d UNTIL -1d ORDER BY sessions DESC") {
         tableData {
           columns { name }
-          rowData
+          rows {
+            cells { value }
+          }
         }
         parseErrors
       }
@@ -77,11 +92,19 @@ def fetch_sessions(date_str):
         return []
 
     columns = [col["name"] for col in table.get("columns", [])]
-    rows    = table.get("rowData", [])
+    rows    = table.get("rows", [])
     print(f"[fetch_sessions] Columns: {columns}", flush=True)
     print(f"[fetch_sessions] Total rows: {len(rows)}", flush=True)
+    if rows:
+        print(f"[fetch_sessions] First row sample: {rows[0]}", flush=True)
 
-    results = [dict(zip(columns, row)) for row in rows]
+    results = []
+    for row in rows:
+        cells = row.get("cells", [])
+        values = [c.get("value") for c in cells]
+        record = dict(zip(columns, values))
+        results.append(record)
+
     print(f"[fetch_sessions] Successfully parsed {len(results)} rows.", flush=True)
     return results
 
