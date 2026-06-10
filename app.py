@@ -92,6 +92,7 @@ def fetch_sessions(date_str):
         raise RuntimeError(f"GraphQL errors: {data['errors']}")
 
     shopify_data = data.get("data", {}).get("shopifyqlQuery", {})
+    print(f"[fetch_sessions] shopifyqlQuery response: {shopify_data}", flush=True)
     parse_errors = shopify_data.get("parseErrors")
     if parse_errors:
         print(f"[fetch_sessions] ShopifyQL parse errors: {parse_errors}", flush=True)
