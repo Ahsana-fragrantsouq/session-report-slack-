@@ -30,6 +30,19 @@ def fetch_sessions(date_str):
         "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
     }
 
+    # First introspect to find correct field names on ShopifyqlTableData
+    introspect = """
+    {
+      __type(name: "ShopifyqlTableData") {
+        fields { name }
+      }
+    }
+    """
+    ir = requests.post(url, json={"query": introspect}, headers=headers, timeout=30)
+    idata = ir.json()
+    fields = [f["name"] for f in idata.get("data", {}).get("__type", {}).get("fields", [])]
+    print(f"[fetch_sessions] ShopifyqlTableData fields: {fields}", flush=True)
+
     query = """
     {
       shopifyqlQuery(query: "FROM sessions SHOW landing_page_type, landing_page_path, online_store_visitors, sessions SINCE -1d UNTIL -1d ORDER BY sessions DESC") {
