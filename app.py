@@ -250,7 +250,7 @@ def run_date(date_str):
 
 # ── SCHEDULER ─────────────────────────────────────────────────────────────────
 scheduler = BackgroundScheduler(timezone=IST)
-scheduler.add_job(run_job, "cron", hour=9, minute=0)
+scheduler.add_job(run_job, "cron", hour=17, minute=45)
 scheduler.start()
 print(f"[startup] Scheduler started. Job will run daily at 09:00 IST.", flush=True)
 print(f"[startup] SHOPIFY_STORE     : {SHOPIFY_STORE}", flush=True)
