@@ -33,13 +33,11 @@ def fetch_sessions(date_str):
     query = """
     {
       shopifyqlQuery(query: "FROM sessions SHOW landing_page_type, landing_page_path, online_store_visitors, sessions SINCE -1d UNTIL -1d ORDER BY sessions DESC") {
-        ... on TableResponse {
-          tableData {
-            columns { name }
-            rowData
-          }
+        tableData {
+          columns { name }
+          rowData
         }
-        parseErrors { code message }
+        parseErrors
       }
     }
     """
@@ -55,7 +53,7 @@ def fetch_sessions(date_str):
         raise RuntimeError(f"GraphQL errors: {data['errors']}")
 
     shopify_data = data.get("data", {}).get("shopifyqlQuery", {})
-    parse_errors = shopify_data.get("parseErrors", [])
+    parse_errors = shopify_data.get("parseErrors")
     if parse_errors:
         print(f"[fetch_sessions] ShopifyQL parse errors: {parse_errors}", flush=True)
         raise ValueError(f"ShopifyQL parse errors: {parse_errors}")
