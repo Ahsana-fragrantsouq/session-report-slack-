@@ -69,16 +69,37 @@ def fetch_sessions(date_str):
     except Exception as e2:
         print(f"[fetch_sessions] Introspect2 error: {e2}", flush=True)
 
-    query = """
-    {
-      shopifyqlQuery(query: "FROM sessions SHOW landing_page_type, landing_page_path, online_store_visitors, sessions SINCE -1d UNTIL -1d GROUP BY landing_page_type, landing_page_path ORDER BY sessions DESC") {
-        tableData {
-          columns { name }
+    # Test with explicit date string AND today to see which returns data
+    for test_since, test_until, label in [
+        (date_str, date_str, f"explicit {date_str}"),
+        ("-1d", "-1d", "relative -1d"),
+        ("-7d", "0d", "last 7 days"),
+    ]:
+        test_query = f"""
+        {{
+          shopifyqlQuery(query: "FROM sessions SHOW landing_page_type, landing_page_path, online_store_visitors, sessions SINCE {test_since} UNTIL {test_until} GROUP BY landing_page_type, landing_page_path ORDER BY sessions DESC") {{
+            tableData {{ columns {{ name }} rows }}
+            parseErrors
+          }}
+        }}
+        """
+        tr = requests.post(url, json={"query": test_query}, headers=headers, timeout=30)
+        td = tr.json()
+        tq = td.get("data", {}).get("shopifyqlQuery", {})
+        rows_count = len((tq.get("tableData") or {}).get("rows") or [])
+        cols = [(tq.get("tableData") or {}).get("columns") or []]
+        print(f"[fetch_sessions] Test '{label}': rows={rows_count}, parseErrors={tq.get('parseErrors')}, graphql_errors={td.get('errors')}", flush=True)
+
+    query = f"""
+    {{
+      shopifyqlQuery(query: "FROM sessions SHOW landing_page_type, landing_page_path, online_store_visitors, sessions SINCE {date_str} UNTIL {date_str} GROUP BY landing_page_type, landing_page_path ORDER BY sessions DESC") {{
+        tableData {{
+          columns {{ name }}
           rows
-        }
+        }}
         parseErrors
-      }
-    }
+      }}
+    }}
     """
 
     print(f"[fetch_sessions] Sending ShopifyQL request...", flush=True)
