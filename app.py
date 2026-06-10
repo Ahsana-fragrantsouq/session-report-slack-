@@ -74,9 +74,7 @@ def fetch_sessions(date_str):
       shopifyqlQuery(query: "FROM sessions SHOW landing_page_type, landing_page_path, online_store_visitors, sessions SINCE -1d UNTIL -1d ORDER BY sessions DESC") {
         tableData {
           columns { name }
-          rows {
-            cells { value }
-          }
+          rows
         }
         parseErrors
       }
@@ -111,11 +109,15 @@ def fetch_sessions(date_str):
     if rows:
         print(f"[fetch_sessions] First row sample: {rows[0]}", flush=True)
 
+    # rows is a JSON scalar — each row is a list of values matching columns order
     results = []
     for row in rows:
-        cells = row.get("cells", [])
-        values = [c.get("value") for c in cells]
-        record = dict(zip(columns, values))
+        if isinstance(row, list):
+            record = dict(zip(columns, row))
+        elif isinstance(row, dict):
+            record = row
+        else:
+            continue
         results.append(record)
 
     print(f"[fetch_sessions] Successfully parsed {len(results)} rows.", flush=True)
