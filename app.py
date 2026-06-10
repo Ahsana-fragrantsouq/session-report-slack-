@@ -20,38 +20,59 @@ IST = ZoneInfo("Asia/Kolkata")
 
 # ── SHOPIFY: fetch sessions by landing page ───────────────────────────────────
 def fetch_sessions(date_str):
-    print(f"[fetch_sessions] Querying Shopify for date: {date_str}", flush=True)
+    print(f"[fetch_sessions] Querying Shopify Admin API for date: {date_str}", flush=True)
 
-    url = f"https://{SHOPIFY_STORE}/api/2026-04/graphql.json"
+    url = f"https://{SHOPIFY_STORE}/admin/api/2026-04/graphql.json"
+    print(f"[fetch_sessions] URL: {url}", flush=True)
+
     headers = {
         "Content-Type": "application/json",
         "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
     }
 
-    # Introspect to find available query fields related to analytics
-    introspect_query = """
+    query = """
     {
-      __type(name: "QueryRoot") {
-        fields {
-          name
-          description
+      shopifyqlQuery(query: "FROM sessions SHOW landing_page_type, landing_page_path, online_store_visitors, sessions SINCE -1d UNTIL -1d ORDER BY sessions DESC") {
+        ... on TableResponse {
+          tableData {
+            columns { name }
+            rowData
+          }
         }
+        parseErrors { code message }
       }
     }
     """
-    print(f"[fetch_sessions] Running GraphQL introspection to find available fields...", flush=True)
-    resp = requests.post(url, json={"query": introspect_query}, headers=headers, timeout=30)
-    print(f"[fetch_sessions] Introspection status: {resp.status_code}", flush=True)
+
+    print(f"[fetch_sessions] Sending ShopifyQL request...", flush=True)
+    resp = requests.post(url, json={"query": query}, headers=headers, timeout=30)
+    print(f"[fetch_sessions] Response status: {resp.status_code}", flush=True)
     data = resp.json()
-    fields = data.get("data", {}).get("__type", {}).get("fields", [])
-    field_names = [f["name"] for f in fields]
-    print(f"[fetch_sessions] Available GraphQL fields: {field_names}", flush=True)
+    print(f"[fetch_sessions] Raw response keys: {list(data.keys())}", flush=True)
 
-    # Filter analytics-related fields
-    analytics_fields = [f for f in field_names if any(k in f.lower() for k in ["analytic", "session", "report", "shopifyql", "visit"])]
-    print(f"[fetch_sessions] Analytics-related fields: {analytics_fields}", flush=True)
+    if "errors" in data:
+        print(f"[fetch_sessions] GraphQL errors: {data['errors']}", flush=True)
+        raise RuntimeError(f"GraphQL errors: {data['errors']}")
 
-    return []
+    shopify_data = data.get("data", {}).get("shopifyqlQuery", {})
+    parse_errors = shopify_data.get("parseErrors", [])
+    if parse_errors:
+        print(f"[fetch_sessions] ShopifyQL parse errors: {parse_errors}", flush=True)
+        raise ValueError(f"ShopifyQL parse errors: {parse_errors}")
+
+    table = shopify_data.get("tableData", {})
+    if not table:
+        print(f"[fetch_sessions] WARNING - No tableData returned from Shopify.", flush=True)
+        return []
+
+    columns = [col["name"] for col in table.get("columns", [])]
+    rows    = table.get("rowData", [])
+    print(f"[fetch_sessions] Columns: {columns}", flush=True)
+    print(f"[fetch_sessions] Total rows: {len(rows)}", flush=True)
+
+    results = [dict(zip(columns, row)) for row in rows]
+    print(f"[fetch_sessions] Successfully parsed {len(results)} rows.", flush=True)
+    return results
 
 
 # ── BUILD EXCEL ───────────────────────────────────────────────────────────────
