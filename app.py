@@ -11,7 +11,7 @@ app = Flask(__name__)
 
 # ── ENV VARS ──────────────────────────────────────────────────────────────────
 SHOPIFY_STORE        = os.environ.get("SHOPIFY_STORE", "fragrantsouq.myshopify.com")
-SHOPIFY_ACCESS_TOKEN = os.environ.get("SHOPIFY_ACCESS_TOKEN")   # shpat_...
+SHOPIFY_ACCESS_TOKEN = os.environ.get("SHOPIFY_ADMIN_API_TOKEN") or os.environ.get("SHOPIFY_ACCESS_TOKEN")  # shpat_...
 SLACK_BOT_TOKEN      = os.environ.get("SLACK_BOT_TOKEN")        # xoxb-...
 SLACK_CHANNEL_ID     = os.environ.get("SLACK_CHANNEL_ID", "C0B9V9U312L")
 
@@ -68,6 +68,7 @@ def fetch_sessions(date_str):
     print(f"[fetch_sessions] Raw response keys: {list(data.keys())}", flush=True)
     if "errors" in data:
         print(f"[fetch_sessions] GraphQL errors: {data['errors']}", flush=True)
+    print(f"[fetch_sessions] Full raw response: {data}", flush=True)
 
     shopify_data = data.get("data", {}).get("shopifyqlQuery", {})
 
